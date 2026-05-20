@@ -11,18 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncGenerator, Dict
+from typing import TYPE_CHECKING, AsyncGenerator, Dict
 from urllib.parse import urlparse
 from uuid import UUID
 
 from datarobot.auth.oauth import AsyncOAuthComponent
 
 from app.ag_ui.stream_manager import AGUIStreamManager, create_stream_manager
-from app.api.v1.spcc.session import SPCCSessionManager
 from app.auth.api_key import APIKeyValidator
 from app.auth.oauth import get_oauth
 from app.chats import ChatRepository
@@ -32,6 +33,13 @@ from app.messages import MessageRepository
 from app.users.identity import IdentityRepository
 from app.users.tokens import Tokens
 from app.users.user import UserRepository
+
+if TYPE_CHECKING:
+    # Imported lazily inside create_deps() at runtime. We avoid the top-level
+    # import because the spcc package imports back into app.deps for the Deps
+    # type at module load time, which would create a circular import via the
+    # api/v1/__init__.py → chat → app.deps → app.api.v1.spcc chain.
+    from app.api.v1.spcc.session import SPCCSessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +56,7 @@ class Deps:
     tokens: Tokens
     user_repo: UserRepository
     stream_manager: AGUIStreamManager[UUID, Dict[str, str]]
-    spcc_session_mgr: SPCCSessionManager | None = None
+    spcc_session_mgr: "SPCCSessionManager | None" = None
 
 
 def sqlite_uri_to_path(uri: str) -> Path | None:
@@ -118,6 +126,9 @@ async def create_deps(
         message_repo=message_repo,
         config=config,
     )
+
+    # Runtime-only import to avoid a module-load-time circular dependency
+    from app.api.v1.spcc.session import SPCCSessionManager
 
     spcc_session_mgr = SPCCSessionManager()
     await spcc_session_mgr.start()
