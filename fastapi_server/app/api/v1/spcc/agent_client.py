@@ -70,10 +70,14 @@ async def evaluate_call(
     """
     last_err: str | None = None
     client = _build_client(config)
+    # "unknown" is a sentinel that tells the agent to use its own configured
+    # default model (LLM_DEFAULT_MODEL from .env / Pulumi). This avoids
+    # hard-coding a model that may not exist on the user's LLM Gateway.
+    model_name = payload.get("model", "unknown")
     for attempt in range(max_retries + 1):
         try:
             resp = await client.chat.completions.create(
-                model=payload.get("model", "datarobot/azure/gpt-4o-mini"),
+                model=model_name,
                 messages=[
                     {
                         "role": "user",
