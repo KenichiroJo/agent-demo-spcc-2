@@ -82,7 +82,7 @@ class TestSPCCAgent:
     def test_derive_grade(self, total: int, expected: str) -> None:
         assert _derive_grade(total) == expected
 
-    def test_full_graph_happy_path(self) -> None:
+    async def test_full_graph_happy_path(self) -> None:
         mock_llm = Mock()
         mock_response = Mock()
         mock_response.content = json.dumps(
@@ -102,7 +102,7 @@ class TestSPCCAgent:
                 "resolution": "最終的に納得",
             }
         )
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
         graph = graph_factory(mock_llm, [], verbose=False).compile()
         payload = {
@@ -113,7 +113,7 @@ class TestSPCCAgent:
             "transcript": "C: こんにちは\nO: いつもお世話になっております",
             "peak_text": "(なし)",
         }
-        result = graph.invoke(
+        result = await graph.ainvoke(
             {"messages": [HumanMessage(content=json.dumps(payload))]}
         )
         eval_out = result["llm_result"]
@@ -122,23 +122,23 @@ class TestSPCCAgent:
         assert eval_out["grade"] == "A"
         assert eval_out["summary"] == "テスト要約"
 
-    def test_full_graph_llm_error(self) -> None:
+    async def test_full_graph_llm_error(self) -> None:
         mock_llm = Mock()
-        mock_llm.invoke.side_effect = RuntimeError("gateway 503")
+        mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("gateway 503"))
         graph = graph_factory(mock_llm, [], verbose=False).compile()
-        result = graph.invoke(
+        result = await graph.ainvoke(
             {"messages": [HumanMessage(content='{"operator": "x"}')]}
         )
         assert "error" in result["llm_result"]
         assert "gateway 503" in result["llm_result"]["error"]
 
-    def test_full_graph_non_json_response(self) -> None:
+    async def test_full_graph_non_json_response(self) -> None:
         mock_llm = Mock()
         mock_response = Mock()
         mock_response.content = "これは JSON ではありません"
-        mock_llm.invoke.return_value = mock_response
+        mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         graph = graph_factory(mock_llm, [], verbose=False).compile()
-        result = graph.invoke(
+        result = await graph.ainvoke(
             {"messages": [HumanMessage(content='{"operator": "x"}')]}
         )
         assert "error" in result["llm_result"]

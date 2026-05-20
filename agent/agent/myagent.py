@@ -203,7 +203,7 @@ def graph_factory(
     """
     del tools  # intentionally unused
 
-    def preprocess_node(state: SPCCState) -> dict[str, Any]:
+    async def preprocess_node(state: SPCCState) -> dict[str, Any]:
         try:
             payload = _parse_payload(state["messages"])
         except ValueError as exc:
@@ -211,7 +211,7 @@ def graph_factory(
             return {"call_payload": {}, "error": str(exc)}
         return {"call_payload": payload, "error": None}
 
-    def evaluate_node(state: SPCCState) -> dict[str, Any]:
+    async def evaluate_node(state: SPCCState) -> dict[str, Any]:
         if state.get("error"):
             return {"llm_result": {"error": state["error"]}}
         payload = state.get("call_payload") or {}
@@ -250,7 +250,7 @@ def graph_factory(
             ("user", user_msg),
         ]
         try:
-            response = llm.invoke(messages)
+            response = await llm.ainvoke(messages)
         except Exception as exc:  # noqa: BLE001
             logger.exception("SPCC evaluate LLM error")
             return {"llm_result": {"error": f"llm error: {exc}"}}
@@ -260,7 +260,7 @@ def graph_factory(
             content = "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
         return {"llm_result": {"_raw": content}}
 
-    def format_node(state: SPCCState) -> dict[str, Any]:
+    async def format_node(state: SPCCState) -> dict[str, Any]:
         result = state.get("llm_result") or {}
         if result.get("error"):
             payload = result
