@@ -7,18 +7,28 @@
 #   http://www.apache.org/licenses/LICENSE-2.0
 """SPCC (Speech Processing Contact Center) emotion karte evaluation agent.
 
-This module exposes the OpenAI-compatible ``MyAgent`` class expected by the
-DataRobot agent framework. Internally it builds a 3-node LangGraph
-(``preprocess`` → ``evaluate`` → ``format``) that scores a single call along
-five dimensions and returns a strict-JSON verdict.
+Architecture
+------------
+The DataRobot SDK (``datarobot_agent_class_from_langgraph``) treats the
+JSON-encoded user message as the prompt-template ``template_input``. That
+means our ``prompt_template`` is what actually produces the LLM input
+messages — the LangGraph nodes only see the already-formatted messages.
 
-Input contract
+So the design is:
+  1. ``prompt_template`` embeds SYSTEM + USER text with ``{operator}``,
+     ``{skill}``, etc. as variables. The SDK fills them from the JSON
+     payload sent by ``fastapi_server`` and produces a list of messages.
+  2. The graph has two nodes:
+       - ``evaluate``: feeds the pre-formatted messages to the LLM
+         (``llm.ainvoke``) via the DataRobot LLM Gateway.
+       - ``format``: parses the LLM response JSON and normalises it.
+
+Brace escaping
 --------------
-The caller (fastapi_server) sends a single user message whose ``content`` is
-a JSON string with the call payload (operator, transcript excerpt, emotion
-section averages, peak utterances, etc.). The ``preprocess`` node parses it,
-the ``evaluate`` node fills the templates and invokes the LLM via the
-DataRobot LLM Gateway, and the ``format`` node validates / returns the JSON.
+Anywhere the system prompt contains literal ``{`` or ``}`` (e.g. the
+JSON-schema example), we double them (``{{`` / ``}}``) so the f-string
+parser doesn't treat them as variables. Only the real variables
+(``{operator}`` etc.) use single braces.
 """
 from __future__ import annotations
 
@@ -27,7 +37,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 import litellm
-from datarobot_genai.core.agents import InvokeReturn, make_system_prompt
+from datarobot_genai.core.agents import InvokeReturn
 from datarobot_genai.core.agents.base import UsageMetrics
 from datarobot_genai.core.chat import agent_chat_completion_wrapper
 from datarobot_genai.core.mcp import MCPConfig
@@ -49,8 +59,9 @@ logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_MODELS = frozenset({"unknown"})
 
-SYSTEM_PROMPT = make_system_prompt(
-    """あなたはコールセンターのオペレーター品質評価の専門家です。
+# NOTE: braces in the JSON-schema example are doubled because this string is
+# fed into a ChatPromptTemplate in f-string mode.
+SYSTEM_PROMPT_TEXT = """あなたはコールセンターのオペレーター品質評価の専門家です。
 提供された通話テキストと感情スコアデータを分析し、以下の5項目を各5点満点で採点してください。
 
 【評価項目】
@@ -67,14 +78,14 @@ SYSTEM_PROMPT = make_system_prompt(
 - 5-12点: C
 
 必ず以下のJSON形式のみで出力すること（前後に説明文・コードフェンス・コメントを付けないこと）:
-{
-  "scores": {
+{{
+  "scores": {{
     "listening": <1-5の整数>,
     "problem_solving": <1-5の整数>,
     "clarity": <1-5の整数>,
     "manner": <1-5の整数>,
     "efficiency": <1-5の整数>
-  },
+  }},
   "total": <合計点 5-25>,
   "grade": "<S/A/B/C のいずれか>",
   "summary": "<通話全体の要約 2-3文>",
@@ -83,9 +94,8 @@ SYSTEM_PROMPT = make_system_prompt(
   "coaching": "<SVへの具体的なコーチング提案 1-2文>",
   "peak_moment": "<不満・怒りがピークになった発言の内容と時刻>",
   "resolution": "<どのように解決・収束したか>"
-}
+}}
 """
-)
 
 USER_TEMPLATE = """【通話情報】
 - オペレーター: {operator}
@@ -104,48 +114,18 @@ USER_TEMPLATE = """【通話情報】
 {transcript}
 """
 
-# The framework requires a ChatPromptTemplate to be exposed; the variables
-# are placeholders so SDK introspection still works. The actual prompt is
-# built dynamically inside ``evaluate_node`` from the parsed payload.
 prompt_template = ChatPromptTemplate.from_messages(
     [
-        ("system", "{system}"),
-        ("user", "{user}"),
+        ("system", SYSTEM_PROMPT_TEXT),
+        ("user", USER_TEMPLATE),
     ]
 )
 
 
 class SPCCState(MessagesState):
-    """LangGraph state extending MessagesState with SPCC-specific fields."""
+    """State extension carrying the parsed LLM evaluation result."""
 
-    call_payload: dict[str, Any]
-    llm_result: dict[str, Any]
-    error: Optional[str]
-
-
-def _parse_payload(messages: list[Any]) -> dict[str, Any]:
-    """Locate the JSON payload in the last human message."""
-    for msg in reversed(messages):
-        content = getattr(msg, "content", None)
-        if not content:
-            continue
-        if isinstance(content, list):  # multimodal content blocks
-            text_chunks = [
-                c.get("text", "") for c in content if isinstance(c, dict)
-            ]
-            content = "\n".join(text_chunks)
-        if not isinstance(content, str):
-            continue
-        text = content.strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            continue
-        try:
-            return json.loads(text[start : end + 1])  # type: ignore[no-any-return]
-        except json.JSONDecodeError:
-            continue
-    raise ValueError("No JSON payload found in messages")
+    llm_result: Optional[dict[str, Any]]
 
 
 def _coerce_int(v: Any, lo: int = 1, hi: int = 5) -> int:
@@ -177,7 +157,11 @@ def _normalize_eval_result(raw: dict[str, Any]) -> dict[str, Any]:
         "efficiency": _coerce_int(scores_in.get("efficiency")),
     }
     total = sum(scores.values())
-    grade = raw.get("grade") if raw.get("grade") in {"S", "A", "B", "C"} else _derive_grade(total)
+    grade = (
+        raw.get("grade")
+        if raw.get("grade") in {"S", "A", "B", "C"}
+        else _derive_grade(total)
+    )
     highlights = raw.get("highlights") or []
     improvements = raw.get("improvements") or []
     return {
@@ -193,77 +177,40 @@ def _normalize_eval_result(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_text(content: Any) -> str:
+    """Pull plain text out of either a string or a multimodal content list."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
+    return str(content or "")
+
+
 def graph_factory(
     llm: BaseChatModel, tools: list[BaseTool], verbose: bool = False
 ) -> StateGraph:
-    """Build the SPCC evaluation graph (preprocess → evaluate → format).
+    """Build the SPCC evaluation graph (evaluate → format).
 
     ``tools`` is accepted for SDK compatibility but unused: this agent does
     not call external tools — its job is pure structured evaluation.
     """
     del tools  # intentionally unused
 
-    async def preprocess_node(state: SPCCState) -> dict[str, Any]:
-        try:
-            payload = _parse_payload(state["messages"])
-        except ValueError as exc:
-            logger.warning("SPCC preprocess: %s", exc)
-            return {"call_payload": {}, "error": str(exc)}
-        return {"call_payload": payload, "error": None}
-
     async def evaluate_node(state: SPCCState) -> dict[str, Any]:
-        if state.get("error"):
-            return {"llm_result": {"error": state["error"]}}
-        payload = state.get("call_payload") or {}
-        if not payload:
-            return {"llm_result": {"error": "empty call_payload"}}
-
-        defaults = {
-            "operator": "(unknown)",
-            "skill": "(unknown)",
-            "duration_sec": 0,
-            "duration_min": 0.0,
-            "transcript": "",
-            "peak_text": "(なし)",
-            "pos_1": 0.0,
-            "dis_1": 0.0,
-            "ang_1": 0.0,
-            "agent_1": 0.0,
-            "pos_2": 0.0,
-            "dis_2": 0.0,
-            "ang_2": 0.0,
-            "agent_2": 0.0,
-            "pos_3": 0.0,
-            "dis_3": 0.0,
-            "ang_3": 0.0,
-            "agent_3": 0.0,
-        }
-        merged = {**defaults, **{k: payload.get(k, v) for k, v in defaults.items()}}
-        try:
-            user_msg = USER_TEMPLATE.format(**merged)
-        except (KeyError, ValueError) as exc:
-            logger.exception("SPCC evaluate format error")
-            return {"llm_result": {"error": f"prompt format error: {exc}"}}
-
-        messages = [
-            ("system", SYSTEM_PROMPT),
-            ("user", user_msg),
-        ]
+        messages = state.get("messages") or []
+        if not messages:
+            return {"llm_result": {"error": "no input messages"}}
         try:
             response = await llm.ainvoke(messages)
         except Exception as exc:  # noqa: BLE001
             logger.exception("SPCC evaluate LLM error")
             return {"llm_result": {"error": f"llm error: {exc}"}}
-
-        content = getattr(response, "content", "") or ""
-        if isinstance(content, list):
-            content = "\n".join(c.get("text", "") for c in content if isinstance(c, dict))
-        return {"llm_result": {"_raw": content}}
+        return {"llm_result": {"_raw": _extract_text(getattr(response, "content", ""))}}
 
     async def format_node(state: SPCCState) -> dict[str, Any]:
         result = state.get("llm_result") or {}
         if result.get("error"):
-            payload = result
+            payload: dict[str, Any] = result
         else:
             raw = str(result.get("_raw") or "")
             text = raw.strip()
@@ -283,15 +230,15 @@ def graph_factory(
                     payload = {"error": f"json decode: {exc}", "_raw": raw[:500]}
         return {
             "llm_result": payload,
-            "messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))],
+            "messages": [
+                AIMessage(content=json.dumps(payload, ensure_ascii=False))
+            ],
         }
 
-    g = StateGraph(SPCCState)
-    g.add_node("preprocess", preprocess_node)
+    g: StateGraph = StateGraph(SPCCState)
     g.add_node("evaluate", evaluate_node)
     g.add_node("format", format_node)
-    g.add_edge(START, "preprocess")
-    g.add_edge("preprocess", "evaluate")
+    g.add_edge(START, "evaluate")
     g.add_edge("evaluate", "format")
     g.add_edge("format", END)
     return g

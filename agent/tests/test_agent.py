@@ -12,14 +12,13 @@ import json
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from agent import MyAgent
 from agent.myagent import (
     _derive_grade,
     _normalize_eval_result,
-    _parse_payload,
     graph_factory,
     prompt_template,
 )
@@ -38,24 +37,16 @@ class TestSPCCAgent:
     def test_prompt_template_is_chat_prompt(self) -> None:
         assert isinstance(prompt_template, ChatPromptTemplate)
 
-    def test_graph_factory_has_three_nodes(self) -> None:
+    def test_prompt_template_declares_payload_variables(self) -> None:
+        """The template must reference variables coming from fastapi_server."""
+        input_vars = set(prompt_template.input_variables)
+        for v in ("operator", "skill", "duration_sec", "transcript", "peak_text"):
+            assert v in input_vars, f"{v} should be a template variable"
+
+    def test_graph_factory_has_two_nodes(self) -> None:
         graph = graph_factory(Mock(), [], verbose=False)
-        assert "preprocess" in graph.nodes
         assert "evaluate" in graph.nodes
         assert "format" in graph.nodes
-
-    def test_parse_payload_extracts_json(self) -> None:
-        msg = HumanMessage(content='{"operator": "テスト", "skill": "問合せ"}')
-        result = _parse_payload([msg])
-        assert result["operator"] == "テスト"
-
-    def test_parse_payload_finds_embedded_json(self) -> None:
-        msg = HumanMessage(content='前置き {"a": 1} 後置き')
-        assert _parse_payload([msg]) == {"a": 1}
-
-    def test_parse_payload_raises_when_missing(self) -> None:
-        with pytest.raises(ValueError):
-            _parse_payload([HumanMessage(content="no json here")])
 
     def test_normalize_clamps_scores(self) -> None:
         raw = {
@@ -77,7 +68,16 @@ class TestSPCCAgent:
 
     @pytest.mark.parametrize(
         "total,expected",
-        [(25, "S"), (22, "S"), (21, "A"), (18, "A"), (17, "B"), (13, "B"), (12, "C"), (5, "C")],
+        [
+            (25, "S"),
+            (22, "S"),
+            (21, "A"),
+            (18, "A"),
+            (17, "B"),
+            (13, "B"),
+            (12, "C"),
+            (5, "C"),
+        ],
     )
     def test_derive_grade(self, total: int, expected: str) -> None:
         assert _derive_grade(total) == expected
@@ -105,16 +105,13 @@ class TestSPCCAgent:
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
 
         graph = graph_factory(mock_llm, [], verbose=False).compile()
-        payload = {
-            "operator": "テスト オペレーター",
-            "skill": "問合せ",
-            "duration_sec": 600,
-            "duration_min": 10.0,
-            "transcript": "C: こんにちは\nO: いつもお世話になっております",
-            "peak_text": "(なし)",
-        }
         result = await graph.ainvoke(
-            {"messages": [HumanMessage(content=json.dumps(payload))]}
+            {
+                "messages": [
+                    SystemMessage(content="sys prompt"),
+                    HumanMessage(content="user prompt"),
+                ]
+            }
         )
         eval_out = result["llm_result"]
         assert eval_out["scores"]["listening"] == 4
@@ -127,7 +124,7 @@ class TestSPCCAgent:
         mock_llm.ainvoke = AsyncMock(side_effect=RuntimeError("gateway 503"))
         graph = graph_factory(mock_llm, [], verbose=False).compile()
         result = await graph.ainvoke(
-            {"messages": [HumanMessage(content='{"operator": "x"}')]}
+            {"messages": [HumanMessage(content="anything")]}
         )
         assert "error" in result["llm_result"]
         assert "gateway 503" in result["llm_result"]["error"]
@@ -139,7 +136,7 @@ class TestSPCCAgent:
         mock_llm.ainvoke = AsyncMock(return_value=mock_response)
         graph = graph_factory(mock_llm, [], verbose=False).compile()
         result = await graph.ainvoke(
-            {"messages": [HumanMessage(content='{"operator": "x"}')]}
+            {"messages": [HumanMessage(content="anything")]}
         )
         assert "error" in result["llm_result"]
         assert "non-JSON" in result["llm_result"]["error"]
