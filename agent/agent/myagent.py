@@ -45,7 +45,6 @@ from datarobot_genai.langgraph.agent import datarobot_agent_class_from_langgraph
 from datarobot_genai.langgraph.llm import get_llm
 from datarobot_genai.langgraph.mcp import mcp_tools_context
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -186,13 +185,37 @@ def _extract_text(content: Any) -> str:
     return str(content or "")
 
 
+def _parse_llm_response(content: str) -> dict[str, Any]:
+    """Extract + validate the evaluation JSON from an LLM response."""
+    text = content.strip()
+    if text.startswith("```"):
+        text = "\n".join(text.split("\n")[1:])
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return {"error": "non-JSON response", "_raw": content[:500]}
+    try:
+        parsed = json.loads(text[start : end + 1])
+    except json.JSONDecodeError as exc:
+        return {"error": f"json decode: {exc}", "_raw": content[:500]}
+    return _normalize_eval_result(parsed)
+
+
 def graph_factory(
     llm: BaseChatModel, tools: list[BaseTool], verbose: bool = False
 ) -> StateGraph:
-    """Build the SPCC evaluation graph (evaluate → format).
+    """Build a single-node SPCC evaluation graph.
 
-    ``tools`` is accepted for SDK compatibility but unused: this agent does
-    not call external tools — its job is pure structured evaluation.
+    Why one node: the DataRobot SDK's ``_stream_generator`` validates each
+    message event emitted by the graph and rejects manually-constructed
+    AIMessages added via state updates. To stay compatible we make exactly
+    one LLM call inside ``evaluate_node`` and return its real response
+    object — langchain's callback machinery tags it with the metadata the
+    SDK expects, so no extra format step is needed.
+
+    ``tools`` is accepted for SDK compatibility but unused.
     """
     del tools  # intentionally unused
 
@@ -205,42 +228,16 @@ def graph_factory(
         except Exception as exc:  # noqa: BLE001
             logger.exception("SPCC evaluate LLM error")
             return {"llm_result": {"error": f"llm error: {exc}"}}
-        return {"llm_result": {"_raw": _extract_text(getattr(response, "content", ""))}}
-
-    async def format_node(state: SPCCState) -> dict[str, Any]:
-        result = state.get("llm_result") or {}
-        if result.get("error"):
-            payload: dict[str, Any] = result
-        else:
-            raw = str(result.get("_raw") or "")
-            text = raw.strip()
-            if text.startswith("```"):
-                text = "\n".join(text.split("\n")[1:])
-                if text.rstrip().endswith("```"):
-                    text = text.rstrip()[:-3]
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1 or end < start:
-                payload = {"error": "non-JSON response", "_raw": raw[:500]}
-            else:
-                try:
-                    parsed = json.loads(text[start : end + 1])
-                    payload = _normalize_eval_result(parsed)
-                except json.JSONDecodeError as exc:
-                    payload = {"error": f"json decode: {exc}", "_raw": raw[:500]}
+        content = _extract_text(getattr(response, "content", ""))
         return {
-            "llm_result": payload,
-            "messages": [
-                AIMessage(content=json.dumps(payload, ensure_ascii=False))
-            ],
+            "messages": [response],  # surface the real LLM message
+            "llm_result": _parse_llm_response(content),
         }
 
     g: StateGraph = StateGraph(SPCCState)
     g.add_node("evaluate", evaluate_node)
-    g.add_node("format", format_node)
     g.add_edge(START, "evaluate")
-    g.add_edge("evaluate", "format")
-    g.add_edge("format", END)
+    g.add_edge("evaluate", END)
     return g
 
 

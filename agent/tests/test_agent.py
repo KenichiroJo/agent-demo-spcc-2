@@ -43,10 +43,9 @@ class TestSPCCAgent:
         for v in ("operator", "skill", "duration_sec", "transcript", "peak_text"):
             assert v in input_vars, f"{v} should be a template variable"
 
-    def test_graph_factory_has_two_nodes(self) -> None:
+    def test_graph_factory_has_evaluate_node(self) -> None:
         graph = graph_factory(Mock(), [], verbose=False)
         assert "evaluate" in graph.nodes
-        assert "format" in graph.nodes
 
     def test_normalize_clamps_scores(self) -> None:
         raw = {
