@@ -1,9 +1,19 @@
 import { useState } from 'react';
-import { Activity, BarChart3, Headphones, Users } from 'lucide-react';
+import {
+  Activity,
+  BarChart3,
+  Headphones,
+  HelpCircle,
+  Users,
+} from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { UploadAndDashboard } from '@/components/spcc/UploadAndDashboard';
 import { OperatorReport } from '@/components/spcc/OperatorReport';
 import { CallDrilldown } from '@/components/spcc/CallDrilldown';
+import {
+  TUTORIAL_STORAGE_KEY,
+  TutorialOverlay,
+} from '@/components/spcc/TutorialOverlay';
 
 const STORAGE_KEY = 'spcc_session_id';
 
@@ -13,6 +23,13 @@ export default function SpccPage() {
       return sessionStorage.getItem(STORAGE_KEY);
     } catch {
       return null;
+    }
+  });
+  const [tutorialOpen, setTutorialOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(TUTORIAL_STORAGE_KEY) !== '1';
+    } catch {
+      return false;
     }
   });
 
@@ -53,6 +70,15 @@ export default function SpccPage() {
             <span className="hidden md:inline">
               DataRobot LLM Gateway 経由で評価
             </span>
+            <button
+              type="button"
+              onClick={() => setTutorialOpen(true)}
+              className="flex items-center gap-1 text-primary hover:underline"
+              title="使い方を表示"
+            >
+              <HelpCircle className="h-4 w-4" />
+              使い方
+            </button>
             {sessionId && (
               <button
                 type="button"
@@ -97,6 +123,11 @@ export default function SpccPage() {
           </TabsContent>
         </Tabs>
       </main>
+
+      <TutorialOverlay
+        open={tutorialOpen}
+        onClose={() => setTutorialOpen(false)}
+      />
     </div>
   );
 }
