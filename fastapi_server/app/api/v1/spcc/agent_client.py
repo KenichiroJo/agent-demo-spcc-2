@@ -30,10 +30,25 @@ class AgentEvaluationError(RuntimeError):
 
 
 def _build_client(config: Config) -> AsyncOpenAI:
+    """Build the OpenAI-compatible client for whichever agent backend is wired.
+
+    - Local dev (`http://localhost:8842`): the DRUM-based agent process does
+      not validate the API key, so the token is harmlessly ignored.
+    - Production: ``config.agent_endpoint`` resolves to a DataRobot deployment
+      URL (e.g. ``https://app.jp.datarobot.com/api/v2/deployments/{id}``) which
+      authenticates via ``Authorization: Bearer <DATAROBOT_API_TOKEN>``.
+
+    We always send the token in both ``api_key`` and an explicit
+    ``Authorization`` default header — mirrors the pattern in ``app/ag_ui/dr.py``
+    and avoids any case where the OpenAI client formats the header
+    differently from what DataRobot expects.
+    """
     endpoint = config.agent_endpoint or "http://localhost:8842"
+    token = config.datarobot_api_token
     return AsyncOpenAI(
         base_url=f"{endpoint.rstrip('/')}/v1",
-        api_key="not-needed",
+        api_key=token,
+        default_headers={"Authorization": f"Bearer {token}"},
         timeout=150.0,
     )
 
